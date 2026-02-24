@@ -35,6 +35,9 @@ src/server.o: src/server.cpp
 src/client.o: src/client.cpp
 	$(CXX) $(CXXFLAGS) -c src/client.cpp -o src/client.o
 
+clientappimage: client
+    NO_STRIP=1 ./linuxdeploy.AppImage --appdir AppDir --executable client --desktop-file client.desktop --icon-file client.svg --output appimage
+
 # --- Windows Cross-Compilation ---
 CXX_WIN = x86_64-w64-mingw32-g++
 PKG_CONFIG_WIN = x86_64-w64-mingw32-pkg-config
@@ -54,15 +57,10 @@ client_win: src/client.cpp
 package_win: client_win server_win
 	mkdir -p release_win
 	cp client.exe server.exe release_win/
-	cp $(HOME)/ffmpeg/libavcodec/*.dll release_win/
-	cp $(HOME)/ffmpeg/libavformat/*.dll release_win/
-	cp $(HOME)/ffmpeg/libavutil/*.dll release_win/
-	cp $(HOME)/ffmpeg/libavdevice/*.dll release_win/
-	cp $(HOME)/ffmpeg/libswscale/*.dll release_win/
-	cp $(HOME)/ffmpeg/libswresample/*.dll release_win/ 2>/dev/null || true
-	cp /usr/x86_64-w64-mingw32/bin/SDL3.dll release_win/
-	@echo "Package created in release_win/ with all necessary DLLs!"
-
+	mingw-ldd client.exe --dll-lookup-dirs /usr/x86_64-w64-mingw32/bin/ | grep mingw | awk '{print $$3}' | xargs -I{} cp {} release_win/
+	mingw-ldd server.exe --dll-lookup-dirs /usr/x86_64-w64-mingw32/bin/ | grep mingw | awk '{print $$3}' | xargs -I{} cp {} release_win/
+	wget -q -O release_win/IddSampleDriver.zip https://github.com/roshkins/IddSampleDriver/releases/download/0.0.1.2/IddSampleDriver.zip || true
+	
 # --- Testing ---
 test: src/tests.cpp
 	$(CXX) -std=c++17 -Wall -Wextra src/tests.cpp -o unit_tests
