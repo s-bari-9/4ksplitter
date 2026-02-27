@@ -36,6 +36,13 @@
 *.exe
 *.out
 *.app
+server
+client
+server_debug
+client_debug
+unit_tests
+linuxdeploy.AppImage
+AppDir/*
 
 # debug information files
 *.dwo

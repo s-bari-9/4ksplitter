@@ -22,67 +22,144 @@ using socklen_t = int;
 #include <iostream>
 #include <vector>
 
+#include "../include/protocol.h"
 #define TARGET_WIDTH 3840
 #define TARGET_HEIGHT 2160
 #define FPS 120
-#include "../include/protocol.h"
+#define TARGET_OUTPUTS 4
 
 #define IP "127.0.0.1"
 
-int main(int argc, char *argv[]) {
-  avdevice_register_all();
+struct Target {
+  std::string ip;
+  uint16_t port;
+};
 
-  std::vector<std::string> target_ips;
-#ifdef _WIN32
-  std::string input_source = "desktop";
-  std::string input_format_str = "gdigrab";
-#else
-  std::string input_source = ":0.0";
-  std::string input_format_str = "x11grab";
-#endif
-  std::string target_encoder = "";
+bool parse_target(const std::string& s, Target& out) {
+  auto pos = s.find(':');
+  if (pos == std::string::npos) {
+    return false;
+  }
+  out.ip = s.substr(0, pos);
+  int port;
+  try {
+    port = std::stoi(s.substr(pos + 1));
+  } catch (...) {
+    return false;
+  }
+  if (port < 0 || port > 65535) {
+    return false;
+  }
+  out.port = static_cast<uint16_t>(port);
+  return true;
+}
+
+struct Config {
+  bool show_help = false;
   bool use_file = false;
 
+  std::string input_source;
+  std::string input_format;
+  std::string target_encoder;
+
+  std::vector<std::string> target_ips;
+  std::vector<Target> targets;
+};
+
+bool parse_args(int argc, char* argv[], Config& cfg) {
+#ifdef _WIN32
+  cfg.input_source = "desktop";
+  cfg.input_format = "gdigrab";
+#else
+  cfg.input_source = ":0.0";
+  cfg.input_format = "x11grab";
+#endif
+
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "-h") == 0 ||
-        std::strcmp(argv[i], "--help") == 0) {
-      std::cout
-          << "Usage: " << argv[0] << " [options] [ip1] [ip2] [ip3] [ip4]\n"
-          << "Options:\n"
-          << "  -h, --help        Show this help message\n"
-          << "  -f <file>         Use a video file as input (overrides "
-             "-t and -i)\n"
-          << "  -t <format>       Input format (default: x11grab/gdigrab). "
-             "e.g., v4l2, x11grab\n"
-          << "  -c:v <encoder>    Set target encoder (e.g., nvenc(default), "
-             "libx264)\n"
-          << "  -i <source>       Input source (default: :0.0). e.g., "
-             "/dev/video0, :99.0\n"
-          << "Example for Xvfb:   " << argv[0]
-          << " -t x11grab -i :99.0 127.0.0.1\n"
-          << "Example for File:   " << argv[0]
-          << " -f test.mkv 192.168.1.100\n";
-      return 0;
-    } else if (std::strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
-      input_source = argv[++i];
-      use_file = true;
-    } else if (std::strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
-      input_format_str = argv[++i];
-    } else if (std::strcmp(argv[i], "-c:v") == 0 && i + 1 < argc) {
-      target_encoder = argv[++i];
-    } else if (std::strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
-      input_source = argv[++i];
-    } else {
-      target_ips.push_back(argv[i]);
+    if (!std::strcmp(argv[i], "-h") || !std::strcmp(argv[i], "--help")) {
+      cfg.show_help = true;
+      return true;
+    }
+    if (!std::strcmp(argv[i], "-f") && i + 1 < argc) {
+      cfg.use_file = true;
+      cfg.input_source = argv[i + 1];
     }
   }
 
-  if (target_ips.empty()) {
-    target_ips.push_back(IP);
+  for (int i = 1; i < argc; ++i) {
+    if (!std::strcmp(argv[i], "-f")) {
+      ++i;
+    } else if (!std::strcmp(argv[i], "-t")) {
+      if (cfg.use_file) {
+        std::cerr << "-t is invalid when using -f\n";
+        return false;
+      }
+      if (i + 1 >= argc) return false;
+      cfg.input_format = argv[++i];
+    } else if (!std::strcmp(argv[i], "-i")) {
+      if (cfg.use_file) {
+        std::cerr << "-i is invalid when using -f\n";
+        return false;
+      }
+      if (i + 1 >= argc) return false;
+      cfg.input_source = argv[++i];
+    } else if (!std::strcmp(argv[i], "-c:v")) {
+      if (i + 1 >= argc) return false;
+      cfg.target_encoder = argv[++i];
+    } else if (argv[i][0] == '-') {
+      std::cerr << "Unknown option: " << argv[i] << "\n";
+      return false;
+    } else {
+      Target t;
+      if (!parse_target(argv[i], t)) {
+        std::cerr << "Invalid target: " << argv[i] << "\n";
+        return false;
+      }
+      cfg.targets.push_back(t);
+    }
+  }
+  if (cfg.target_ips.empty()) {
+    for (uint16_t i = 5000; i<5004; i++) {
+      cfg.targets.push_back(Target{"127.0.0.1", i});
+    }
+  }
+  while (cfg.targets.size() < 4) {
+    cfg.targets.push_back(cfg.targets.back());
   }
 
-  while (target_ips.size() < 4) {
-    target_ips.push_back(target_ips.back());
+  return true;
+}
+
+void print_help(char name[]) {
+  std::cout
+    << "Usage: " << name << " [options] [ip1] [ip2] [ip3] [ip4]\n"
+    << "Options:\n"
+    << "  -h, --help        Show this help message\n"
+    << "  -f <file>         Use a video file as input (overrides "
+    "-t and -i)\n"
+    << "  -t <format>       Input format (default: x11grab/gdigrab). "
+    "e.g., v4l2, x11grab\n"
+    << "  -c:v <encoder>    Set target encoder (e.g., nvenc(default), "
+    "libx264)\n"
+    << "  -i <source>       Input source (default: :0.0). e.g., "
+    "/dev/video0, :99.0\n"
+    << "Example for Xvfb:   " << name
+    << " -t x11grab -i :99.0 127.0.0.1\n"
+    << "Example for File:   " << name
+    << " -f test.mkv 192.168.1.100\n";
+}
+
+int main(int argc, char *argv[]) {
+  Config cfg;
+  avdevice_register_all();
+
+  if (!parse_args(argc, argv, cfg)) {
+    return 1;
+  }
+
+  if (cfg.show_help) {
+    print_help(argv[0]);
+    return 0;
   }
 
 #ifdef _WIN32
@@ -99,14 +176,18 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  std::vector<sockaddr_in> destinations(4);
-  for (int i = 0; i < 4; ++i) {
+  std::vector<sockaddr_in> destinations(TARGET_OUTPUTS);
+
+  for (int i = 0; i < TARGET_OUTPUTS; ++i) {
+    destinations[i] = {};
     destinations[i].sin_family = AF_INET;
-    // Increment ports for localhost testing
-    destinations[i].sin_port = htons(5000 + i);
-    if (inet_pton(AF_INET, target_ips[i].c_str(), &destinations[i].sin_addr) <=
-        0) {
-      std::cerr << "Invalid IP address: " << target_ips[i] << "\n";
+    std::cout<<cfg.targets[i].ip<<" "<<cfg.targets[i].port<<std::endl;
+    destinations[i].sin_port = htons(cfg.targets[i].port);
+
+    if (inet_pton(AF_INET,
+          cfg.targets[i].ip.c_str(),
+          &destinations[i].sin_addr) <= 0) {
+      std::cerr << "Invalid IP address: " << cfg.targets[i].ip << "\n";
       return 1;
     }
   }
@@ -116,24 +197,24 @@ int main(int argc, char *argv[]) {
   const AVInputFormat *iformat = nullptr;
   AVDictionary *options = nullptr;
 
-  if (!use_file) {
-    iformat = av_find_input_format(input_format_str.c_str());
+  if (!cfg.use_file) {
+    iformat = av_find_input_format(cfg.input_format.c_str());
     if (!iformat) {
-      std::cerr << "Input format '" << input_format_str << "' not found.\n";
+      std::cerr << "Input format '" << cfg.input_format << "' not found.\n";
       return 1;
     }
 
-    if (input_format_str == "x11grab" || input_format_str == "v4l2" ||
-        input_format_str == "video4linux2") {
+    if (cfg.input_format == "x11grab" || cfg.input_format == "v4l2" ||
+        cfg.input_format == "video4linux2") {
       av_dict_set(&options, "video_size", "3840x2160", 0);
       av_dict_set(&options, "framerate", "120", 0);
     }
   }
 
-  std::cout << "Opening input source: " << input_source
-            << " (File: " << (use_file ? "yes" : "no") << ")\n";
+  std::cout << "Opening input source: " << cfg.input_source
+    << " (File: " << (cfg.use_file ? "yes" : "no") << ")\n";
 
-  if (avformat_open_input(&fmt_ctx, input_source.c_str(), iformat, &options) <
+  if (avformat_open_input(&fmt_ctx, cfg.input_source.c_str(), iformat, &options) <
       0) {
     std::cerr << "Could not open input source.\n";
     return 1;
@@ -156,7 +237,7 @@ int main(int argc, char *argv[]) {
       fmt_ctx->streams[video_stream_idx]->codecpar->codec_id);
   AVCodecContext *dec_ctx = avcodec_alloc_context3(dec_codec);
   avcodec_parameters_to_context(dec_ctx,
-                                fmt_ctx->streams[video_stream_idx]->codecpar);
+      fmt_ctx->streams[video_stream_idx]->codecpar);
   if (avcodec_open2(dec_ctx, dec_codec, nullptr) < 0) {
     std::cerr << "Failed to open decoder\n";
     return 1;
@@ -164,10 +245,10 @@ int main(int argc, char *argv[]) {
 
   // Encoder setup
   std::vector<std::string> encoder_priority = {"av1_nvenc",  "hevc_nvenc",
-                                               "h264_qsv",   "h264_amf",
-                                               "h264_vaapi", "libx264"};
-  if (!target_encoder.empty()) {
-    encoder_priority.insert(encoder_priority.begin(), target_encoder);
+    "h264_qsv",   "h264_amf",
+    "h264_vaapi", "libx264"};
+  if (!cfg.target_encoder.empty()) {
+    encoder_priority.insert(encoder_priority.begin(), cfg.target_encoder);
   }
 
   const AVCodec *enc_codec = nullptr;
@@ -184,7 +265,7 @@ int main(int argc, char *argv[]) {
 
   if (!enc_codec) {
     std::cerr << "Fatal: Could not find any suitable video encoders (tried "
-                 "NVENC, QSV, AMF, VAAPI, libx264)!\n";
+      "NVENC, QSV, AMF, VAAPI, libx264)!\n";
     return 1;
   }
 
@@ -212,7 +293,7 @@ int main(int argc, char *argv[]) {
 
     if (avcodec_open2(enc_ctx[i], enc_codec, nullptr) < 0) {
       std::cerr << "Failed to open encoder " << i << " (" << final_encoder_name
-                << ")\n";
+        << ")\n";
       return 1;
     }
   }
@@ -227,14 +308,14 @@ int main(int argc, char *argv[]) {
 
   auto send_quad_to_client = [&](int quad_idx, uint8_t *buf, size_t len) {
     sendto(sock, (const char *)buf, len, 0, (sockaddr *)&destinations[quad_idx],
-           sizeof(destinations[quad_idx]));
+        sizeof(destinations[quad_idx]));
   };
 
   // Extradata
   for (int q = 0; q < 4; q++) {
     if (enc_ctx[q]->extradata && enc_ctx[q]->extradata_size > 0) {
       size_t total_chunks =
-          (enc_ctx[q]->extradata_size + MAX_UDP_PAYLOAD - 1) / MAX_UDP_PAYLOAD;
+        (enc_ctx[q]->extradata_size + MAX_UDP_PAYLOAD - 1) / MAX_UDP_PAYLOAD;
       for (size_t i = 0; i < total_chunks; i++) {
         size_t offset = i * MAX_UDP_PAYLOAD;
         size_t chunk_size = std::min<size_t>(
@@ -299,15 +380,15 @@ int main(int argc, char *argv[]) {
             av_frame_get_buffer(converted_frame, 32);
 
             sws = sws_getContext(process_frame->width, process_frame->height,
-                                 (AVPixelFormat)process_frame->format,
-                                 process_frame->width, process_frame->height,
-                                 AV_PIX_FMT_NV12, SWS_BILINEAR, nullptr,
-                                 nullptr, nullptr);
+                (AVPixelFormat)process_frame->format,
+                process_frame->width, process_frame->height,
+                AV_PIX_FMT_NV12, SWS_BILINEAR, nullptr,
+                nullptr, nullptr);
 
             if (sws) {
               sws_scale(sws, process_frame->data, process_frame->linesize, 0,
-                        process_frame->height, converted_frame->data,
-                        converted_frame->linesize);
+                  process_frame->height, converted_frame->data,
+                  converted_frame->linesize);
               nv12_frame = converted_frame;
             } else {
               std::cerr << "Error creating SWS context\n";
@@ -341,30 +422,30 @@ int main(int argc, char *argv[]) {
             // Copy Y plane
             for (int y = 0; y < half_h; y++) {
               memcpy(quad_frame[q]->data[0] + y * quad_frame[q]->linesize[0],
-                     nv12_frame->data[0] +
-                         (start_y + y) * nv12_frame->linesize[0] + start_x,
-                     half_w);
+                  nv12_frame->data[0] +
+                  (start_y + y) * nv12_frame->linesize[0] + start_x,
+                  half_w);
             }
 
             // Copy UV plane (interleaved)
             for (int y = 0; y < half_h / 2; y++) {
               memcpy(quad_frame[q]->data[1] + y * quad_frame[q]->linesize[1],
-                     nv12_frame->data[1] +
-                         (start_y / 2 + y) * nv12_frame->linesize[1] +
-                         start_x, // start_x bytes for interleaved UV
-                     half_w); // NV12: chroma plane has half height, full width
-                              // bytes
+                  nv12_frame->data[1] +
+                  (start_y / 2 + y) * nv12_frame->linesize[1] +
+                  start_x, // start_x bytes for interleaved UV
+                  half_w); // NV12: chroma plane has half height, full width
+                           // bytes
             }
 
             // Encode and Send
             if (avcodec_send_frame(enc_ctx[q], quad_frame[q]) == 0) {
               while (avcodec_receive_packet(enc_ctx[q], out_pkt) == 0) {
                 size_t total_chunks =
-                    (out_pkt->size + MAX_UDP_PAYLOAD - 1) / MAX_UDP_PAYLOAD;
+                  (out_pkt->size + MAX_UDP_PAYLOAD - 1) / MAX_UDP_PAYLOAD;
                 for (size_t i = 0; i < total_chunks; i++) {
                   size_t offset = i * MAX_UDP_PAYLOAD;
                   size_t chunk_size =
-                      std::min<size_t>(MAX_UDP_PAYLOAD, out_pkt->size - offset);
+                    std::min<size_t>(MAX_UDP_PAYLOAD, out_pkt->size - offset);
                   uint8_t buf[MAX_UDP_PAYLOAD + 12];
                   buf[0] = FRAME;
                   uint32_t net_frame_id = htonl(output_frame_id);
@@ -383,7 +464,7 @@ int main(int argc, char *argv[]) {
           }
           output_frame_id++;
           std::cout << "Sent 4 quadrants for frame " << output_frame_id << "\r"
-                    << std::flush;
+            << std::flush;
 
           if (converted_frame) {
             av_frame_free(&converted_frame);
