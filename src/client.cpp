@@ -17,25 +17,16 @@ using socklen_t = int;
 #endif
 
 #include <chrono>
-#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <map>
 #include <vector>
 
+#include "../include/protocol.h"
+
 #define PORT 5000
 #define MAX_UDP_PAYLOAD 1400
-
-enum PacketType : uint8_t { EXTRADATA = 0, FRAME = 1 };
-
-struct FrameBuffer {
-  std::vector<uint8_t> data;
-  size_t total_chunks = 0;
-  size_t received_chunks = 0;
-  size_t actual_size = 0;
-  std::chrono::steady_clock::time_point last_updated;
-};
 
 struct NetworkContext {
   int sock = -1;
@@ -94,16 +85,22 @@ void cleanup_network(NetworkContext &net_ctx) {
 struct DecoderContext {
   AVBufferRef *hw_device_ctx = nullptr;
   AVCodecContext *ctx = nullptr;
+  AVPixelFormat hw_pix_fmt = AV_PIX_FMT_NONE;
 };
 
-bool setup_decoder(DecoderContext &dec_ctx) {
-  if (av_hwdevice_ctx_create(&dec_ctx.hw_device_ctx, AV_HWDEVICE_TYPE_CUDA,
-                             nullptr, nullptr, 0) < 0) {
-    std::cerr << "Warning: Failed to create CUDA hardware context. Falling "
-                 "back to software decoding.\n";
-    dec_ctx.hw_device_ctx = nullptr;
+static AVPixelFormat get_hw_format(AVCodecContext *ctx,
+                                   const AVPixelFormat *pix_fmts) {
+  DecoderContext *dec_ctx = (DecoderContext *)ctx->opaque;
+  for (const AVPixelFormat *p = pix_fmts; *p != -1; p++) {
+    if (*p == dec_ctx->hw_pix_fmt) {
+      return *p;
+    }
   }
+  std::cerr << "Failed to get HW surface format.\n";
+  return AV_PIX_FMT_NONE;
+}
 
+bool setup_decoder(DecoderContext &dec_ctx) {
   const AVCodec *codec = avcodec_find_decoder_by_name("av1");
   if (!codec) {
     std::cerr << "AV1 decoder not found.\n";
@@ -114,8 +111,50 @@ bool setup_decoder(DecoderContext &dec_ctx) {
   if (!dec_ctx.ctx)
     return false;
 
-  dec_ctx.ctx->hw_device_ctx =
-      dec_ctx.hw_device_ctx ? av_buffer_ref(dec_ctx.hw_device_ctx) : nullptr;
+  AVHWDeviceType hw_priority[] = {
+      AV_HWDEVICE_TYPE_VDPAU, AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_VAAPI,
+      AV_HWDEVICE_TYPE_QSV,   AV_HWDEVICE_TYPE_DXVA2,   AV_HWDEVICE_TYPE_CUDA,
+      AV_HWDEVICE_TYPE_NONE};
+
+  for (int i = 0; hw_priority[i] != AV_HWDEVICE_TYPE_NONE; i++) {
+    AVHWDeviceType type = hw_priority[i];
+    if (av_hwdevice_ctx_create(&dec_ctx.hw_device_ctx, type, nullptr, nullptr,
+                               0) >= 0) {
+      std::cout << "Successfully initialized hardware decoder: "
+                << av_hwdevice_get_type_name(type) << "\n";
+
+      for (int j = 0;; j++) {
+        const AVCodecHWConfig *config = avcodec_get_hw_config(codec, j);
+        if (!config) {
+          std::cerr << "Decoder " << codec->name
+                    << " does not support device type "
+                    << av_hwdevice_get_type_name(type) << "\n";
+          break;
+        }
+        if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+            config->device_type == type) {
+          dec_ctx.hw_pix_fmt = config->pix_fmt;
+          break;
+        }
+      }
+
+      if (dec_ctx.hw_pix_fmt != AV_PIX_FMT_NONE) {
+        dec_ctx.ctx->hw_device_ctx = av_buffer_ref(dec_ctx.hw_device_ctx);
+        dec_ctx.ctx->opaque = &dec_ctx;
+        dec_ctx.ctx->get_format = get_hw_format;
+        break; // Successfully configured hardware decoding
+      } else {
+        std::cerr << "Failed to find supported hardware pixel format for "
+                  << av_hwdevice_get_type_name(type) << "\n";
+        av_buffer_unref(&dec_ctx.hw_device_ctx);
+      }
+    }
+  }
+
+  if (!dec_ctx.hw_device_ctx) {
+    std::cerr << "Warning: Failed to create ANY hardware context. Falling back "
+                 "to simple software decoding.\n";
+  }
 
   if (avcodec_open2(dec_ctx.ctx, codec, nullptr) < 0) {
     std::cerr << "Failed to open AV1 decoder\n";
@@ -265,7 +304,7 @@ void run_client_loop(NetworkContext &net_ctx, DecoderContext &dec_ctx,
           while (avcodec_receive_frame(dec_ctx.ctx, state.frame) == 0) {
             AVFrame *target_frame = state.frame;
 
-            if (state.frame->format == AV_PIX_FMT_CUDA) {
+            if (state.frame->hw_frames_ctx) {
               if (av_hwframe_transfer_data(state.sw_frame, state.frame, 0) ==
                   0) {
                 target_frame = state.sw_frame;

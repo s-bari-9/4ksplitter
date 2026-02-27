@@ -18,11 +18,10 @@ using socklen_t = int;
 #include <unistd.h>
 #endif
 
+#include "../include/protocol.h"
 #include <cstring>
 #include <iostream>
-#include <vector>
 
-#include "../include/protocol.h"
 #define TARGET_WIDTH 3840
 #define TARGET_HEIGHT 2160
 #define FPS 120
@@ -307,7 +306,7 @@ bool setup_encoders(const Config &cfg, EncoderContext &enc_ctx) {
     enc_ctx.enc_ctx[i]->max_b_frames = 0;
     enc_ctx.enc_ctx[i]->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-    av_opt_set(enc_ctx.enc_ctx[i]->priv_data, "preset", "p1", 0);
+    // av_opt_set(enc_ctx.enc_ctx[i]->priv_data, "preset", "p1", 0);
     av_opt_set(enc_ctx.enc_ctx[i]->priv_data, "tune", "ull", 0);
     av_opt_set(enc_ctx.enc_ctx[i]->priv_data, "tune", "zerolatency", 0);
     av_opt_set(enc_ctx.enc_ctx[i]->priv_data, "profile", "main", 0);
